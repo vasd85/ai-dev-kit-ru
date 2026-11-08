@@ -1,0 +1,29 @@
+{
+  "format_version": "0.1-p2",
+  "id": "product",
+  "revision": 1,
+  "scope": "product",
+  "profile": "docs/ai-work/project.md",
+  "editor": {
+    "role": "product-coordinator",
+    "session": "current-session",
+    "status": "active"
+  },
+  "iterations": [
+    {
+      "id": "preparation",
+      "goal": "Уточнить ближайшую потребность и допустимый шаг; реализация пока не разрешена",
+      "status": "planned"
+    }
+  ],
+  "works": [],
+  "actions": [],
+  "continuation": {
+    "owner": "product-coordinator",
+    "last_completed": "Чистая форма: заполнить фактическим исходным состоянием",
+    "unverified": [
+      "Стек, команды проверок и разрешение реализации ещё не установлены"
+    ],
+    "next_step": "Записать идею, решения и разрешённую подготовку в профиле; не назначать учебную задачу"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "id": "result-1",
+  "revision": 1,
+  "assignment_id": "assignment-1",
+  "assignment_revision": 1,
+  "attempt_id": "attempt-1",
+  "executor": "local-agent",
+  "summary": "Заполнить фактически сделанным изменением",
+  "commit": "Заменить полным идентификатором уже проверенного коммита",
+  "artifacts": [
+    "source.py",
+    "test_source.py"
+  ],
+  "checks": [
+    {
+      "id": "check-1",
+      "command": "python3 -B -m unittest -v test_source",
+      "cwd": ".",
+      "expected": "2 теста проходят",
+      "observed": "Заменить фактическим результатом запуска; форма сама не доказывает успех",
+      "outcome": "passed",
+      "environment": "Заполнить фактическими версиями Python и ОС",
+      "covers": [
+        {
+          "work": "task-1",
+          "assignment_revision": 1,
+          "criterion": "criterion-spaces"
+        }
+      ]
+    }
+  ],
+  "unverified": [],
+  "limitations": [
+    "Проверен только заданный сценарий функции"
+  ],
+  "next_step": "Координатору сопоставить результат с поручением и записать приёмку"
+}

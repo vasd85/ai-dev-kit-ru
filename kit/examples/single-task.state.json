@@ -1,0 +1,89 @@
+{
+  "format_version": "0.1-p2",
+  "id": "product",
+  "revision": 1,
+  "scope": "product",
+  "profile": "docs/ai-work/project.md",
+  "editor": {
+    "role": "local-agent",
+    "session": "local-session",
+    "status": "active"
+  },
+  "iterations": [
+    {
+      "id": "iteration-1",
+      "goal": "Нормализовать пробелы в одной строке",
+      "status": "active"
+    }
+  ],
+  "works": [
+    {
+      "id": "task-1",
+      "kind": "task",
+      "status": "ready",
+      "iteration": "iteration-1",
+      "assignment": {
+        "id": "assignment-1",
+        "revision": 1,
+        "goal": "Убрать крайние пробелы и свести внутренние пробельные группы к одному пробелу",
+        "boundaries": "Изменить только функцию normalize; без новых зависимостей и выпуска",
+        "inputs": [
+          "docs/ai-work/project.md",
+          "source.py",
+          "test_source.py"
+        ],
+        "criteria": [
+          {
+            "id": "criterion-spaces",
+            "expectation": "normalize('  a   b  ') == 'a b'; пустая строка остаётся пустой"
+          }
+        ],
+        "plan": [
+          "Прочитать функцию и тест",
+          "Исправить нормализацию",
+          "Сохранить входы в Git",
+          "Проверить коммит и представить результат"
+        ],
+        "acceptor": "local-agent",
+        "authority": {
+          "by": "user",
+          "source": "docs/ai-work/project.md"
+        },
+        "stage": "implement",
+        "write_scope": [
+          "source.py"
+        ]
+      },
+      "active_attempt": "attempt-1",
+      "attempts": [
+        {
+          "id": "attempt-1",
+          "assignment_revision": 1,
+          "executor": "local-agent",
+          "phase": "assigned",
+          "effects": [
+            "write",
+            "git"
+          ]
+        }
+      ]
+    }
+  ],
+  "write_owner": "product",
+  "git_owner": "product",
+  "actions": [
+    {
+      "work": "task-1",
+      "kind": "assign",
+      "bases": []
+    }
+  ],
+  "continuation": {
+    "owner": "local-agent",
+    "last_completed": "Поручение подготовлено; прежних исполнителей нет",
+    "unverified": [
+      "Правка ещё не выполнена"
+    ],
+    "next_step": "Выполнить поручение, сохранить входы в Git, проверить, представить результат"
+  }
+}
