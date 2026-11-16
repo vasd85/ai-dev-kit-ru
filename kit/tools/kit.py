@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Read-only CLI for p1/p2; Checker retains the limited p1 contract."""
+"""Read-only CLI; Checker retains the limited legacy record contract."""
 
 import argparse
 import os
 import re
 import sys
 
-VERSION = "0.1-p1"
-SCOPE = "Охват: 0.1-p2 — несколько работ и текущие действия; 0.1-p1 — прежний ограниченный путь."
+from versions import CURRENT_FORMAT, LEGACY_FORMAT, SUPPORTED_FORMATS, record_format
+
+SCOPE = (f"Охват: {CURRENT_FORMAT} — несколько работ и текущие действия; "
+         f"{LEGACY_FORMAT} — прежний ограниченный путь. Прежние обозначения форматов поддерживаются.")
 LIMIT = "Это не проверка качества продукта и не готовность полного комплекта."
 
 
@@ -20,7 +22,10 @@ from read_support import (
 class Checker(BaseChecker):
     def basis(self, state, where):
         try:
-            return (state["format_version"], state["scope"], state["profile"], state["coordinator"],
+            version = record_format(state["format_version"])
+            if version != LEGACY_FORMAT:
+                unsupported(where + "/format_version", "ожидается " + LEGACY_FORMAT)
+            return (version, state["scope"], state["profile"], state["coordinator"],
                     state["iteration"], state["task"]["id"], state["task"]["assignment"],
                     {k: state["task"]["attempt"][k]
                      for k in ("id", "executor", "assignment_revision")})
@@ -34,8 +39,8 @@ class Checker(BaseChecker):
         s = parse(state_path.read_bytes(), self.state_name)
         obj(s, "state", ["format_version", "scope", "profile", "coordinator", "iteration",
                          "task", "continuation"], ["forecast", "dependencies", "real_limits"])
-        if s["format_version"] != VERSION:
-            unsupported("state/format_version", f"поддерживается только {VERSION}")
+        if record_format(s["format_version"]) != LEGACY_FORMAT:
+            unsupported("state/format_version", f"ожидается {LEGACY_FORMAT} или его прежнее обозначение")
         if s["scope"] != "single-task":
             unsupported("state/scope", "поддерживается только single-task")
         for key in ("dependencies", "real_limits"):
@@ -232,9 +237,9 @@ def main(argv=None):
     try:
         checker = Checker(args.root, args.state)
         initial = parse(checker.file(args.state, "state").read_bytes(), args.state)
-        if isinstance(initial, dict) and "format_version" in initial and initial["format_version"] not in ("0.1-p1", "0.1-p2"):
-            unsupported("state/format_version", "поддерживаются только 0.1-p1 и 0.1-p2")
-        if isinstance(initial, dict) and initial.get("format_version") == "0.1-p2":
+        if isinstance(initial, dict) and "format_version" in initial and record_format(initial["format_version"]) is None:
+            unsupported("state/format_version", "поддерживаются только " + SUPPORTED_FORMATS)
+        if isinstance(initial, dict) and record_format(initial.get("format_version")) == CURRENT_FORMAT:
             from records import RecordsChecker
             checker = RecordsChecker(args.root, args.state)
         status = checker.check()

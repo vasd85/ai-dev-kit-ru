@@ -1,4 +1,4 @@
-"""0.1-p2 records. Declarative checks only; no execution or state transitions."""
+"""Current records. Declarative checks only; no execution or state transitions."""
 
 import os
 from pathlib import PurePosixPath
@@ -7,7 +7,7 @@ from fractions import Fraction
 
 from read_support import BaseChecker, bad, canonical, equal, number, obj, parse, revision, string, strings, unsupported
 
-VERSION = "0.1-p2"
+from versions import CURRENT_FORMAT, record_format
 
 
 def sequence(value, where, nonempty=False):
@@ -90,7 +90,7 @@ class RecordsChecker(BaseChecker):
         self.coordination()
         self.resources()
         self.actions()
-        return f"{VERSION}; {len(self.works)} работ; только заявленные действия"
+        return f"{CURRENT_FORMAT}; {len(self.works)} работ; только заявленные действия"
 
     def read_state(self, name, parent):
         s = self.load(name, name)
@@ -98,8 +98,8 @@ class RecordsChecker(BaseChecker):
                       "iterations", "works", "continuation"],
             ["parent", "actions", "write_owner", "git_owner", "decisions", "revision_review",
              "forecast", "real_limits", "usage_views", "external_links"])
-        if s["format_version"] != VERSION:
-            unsupported(name + "/format_version", "поддерживается только " + VERSION)
+        if record_format(s["format_version"]) != CURRENT_FORMAT:
+            unsupported(name + "/format_version", "ожидается " + CURRENT_FORMAT + " или его прежнее обозначение")
         if s["scope"] not in ("product", "feature"):
             unsupported(name + "/scope", "поддержаны product и feature")
         self.ident(s["id"], name + "/id")
@@ -295,7 +295,7 @@ class RecordsChecker(BaseChecker):
         if key not in self.snapshots:
             task, _, name, w = self.works[wid]
             saved = self.saved_json(ref, name)
-            if not isinstance(saved, dict) or saved.get("format_version") != VERSION:
+            if not isinstance(saved, dict) or record_format(saved.get("format_version")) != CURRENT_FORMAT:
                 bad(w, "нет поддержанного состояния в Git")
             matches = [x for x in sequence(saved.get("works"), "Git:works")
                        if isinstance(x, dict) and x.get("id") == wid]
