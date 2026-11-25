@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Read-only CLI; Checker retains the limited legacy record contract."""
+"""Kit CLI. Only explicit move, migration prepare and migration switch write."""
 
 import argparse
+import json
 import os
 import re
 import sys
 
-from versions import CURRENT_FORMAT, LEGACY_FORMAT, SUPPORTED_FORMATS, record_format
+# A diagnostic run from a project's installed copy must not populate that copy.
+if __name__ == "__main__":
+    sys.dont_write_bytecode = True
 
-SCOPE = (f"Охват: {CURRENT_FORMAT} — несколько работ и текущие действия; "
+from versions import CURRENT_FORMAT, LEGACY_FORMAT, STATE_FORMATS, TASK_FORMAT, record_format
+
+SCOPE = (f"Охват: {TASK_FORMAT} — карточки задач; {CURRENT_FORMAT} — несколько работ и текущие действия; "
          f"{LEGACY_FORMAT} — прежний ограниченный путь. Прежние обозначения форматов поддерживаются.")
 LIMIT = "Это не проверка качества продукта и не готовность полного комплекта."
 
 
 from read_support import (
-    BaseChecker, Problem, bad, unsupported, emit, git_environment, obj, string,
-    strings, revision, equal, parse, number, canonical,
+    BaseChecker, Problem, bad, unsupported, emit, obj, string, strings,
+    revision, equal, parse, number, canonical, json_record,
 )
+from records import LEGACY_ASSIGNMENT_FIELDS, RESULT_FIELDS, RecordsChecker
 
 
 class Checker(BaseChecker):
@@ -57,9 +63,7 @@ class Checker(BaseChecker):
         status = task["status"]
         if status not in ("ready", "in_progress", "submitted", "accepted"):
             unsupported("task/status", "пакет 1: ready, in_progress, submitted, accepted")
-        a = obj(task["assignment"], "assignment",
-                ["id", "revision", "goal", "boundaries", "inputs", "write_files", "criteria",
-                 "plan", "executor", "acceptor", "authorized_action", "authority"])
+        a = obj(task["assignment"], "assignment", LEGACY_ASSIGNMENT_FIELDS)
         self.ident(a["id"], "assignment/id")
         revision(a["revision"], "assignment/revision")
         for key in ("goal", "boundaries", "executor", "acceptor"):
@@ -129,9 +133,7 @@ class Checker(BaseChecker):
         task, a = s["task"], s["task"]["assignment"]
         if "result" not in task:
             bad("task/result", "нет обязательного результата представленной попытки")
-        r = obj(task["result"], "result",
-                ["id", "revision", "assignment_id", "assignment_revision", "attempt_id", "executor",
-                 "summary", "commit", "artifacts", "checks", "unverified", "limitations", "next_step"])
+        r = obj(task["result"], "result", RESULT_FIELDS)
         self.ident(r["id"], "result/id")
         revision(r["revision"], "result/revision")
         for key, expected in (("assignment_id", a["id"]), ("assignment_revision", a["revision"]),
@@ -226,23 +228,169 @@ class Checker(BaseChecker):
             bad("acceptance/evidence", "приёмка не покрывает все критерии")
 
 
+def select_checker(args):
+    state = args.state if args.state is not None else "docs/ai-work/state.json"
+    if args.profile is not None:
+        from task_reader import profile_selection
+        base = BaseChecker(args.root, None)
+        profile = base.file(args.profile, "profile")
+        selection = profile_selection(profile.read_text(encoding="utf-8"), args.profile)
+        expected, state = selection["format_version"], selection["path"]
+        if expected == TASK_FORMAT:
+            from task_actions import TaskActions
+            return TaskActions(args.root, state), selection
+        return state_checker(args.root, state, expected), selection
+    return state_checker(args.root, state), None
+
+
+def state_checker(root, state, expected=None):
+    base = BaseChecker(root, state)
+    initial = parse(base.file(state, "state").read_bytes(), state)
+    version = record_format(initial.get("format_version")) if isinstance(initial, dict) else None
+    if isinstance(initial, dict) and "format_version" in initial and version not in (
+            LEGACY_FORMAT, CURRENT_FORMAT):
+        unsupported("state/format_version", "для файла состояния поддерживаются только " + STATE_FORMATS)
+    if expected is not None and version != expected:
+        bad("state/format_version", f"источник {state} не соответствует формату {expected} из профиля")
+    if version == CURRENT_FORMAT:
+        return RecordsChecker(root, state)
+    return Checker(root, state)
+
+
+def show_tasks(args):
+    from task_reader import TaskReader
+    reader = TaskReader.from_profile(args.root, args.profile)
+    data = reader.show(args.number) if args.number is not None else reader.list_tasks()
+    emit(json.dumps(data, ensure_ascii=False, indent=2))
+    for info in reader.infos:
+        print("INFO: " + info, file=sys.stderr)
+
+
+def show_material(args):
+    from task_reader import TaskReader, read_history
+    address = {"path": args.path}
+    if args.task is not None:
+        if args.profile is None or args.select is not None:
+            bad("read", "для --task нужен --profile; выбор записи относится только к --commit")
+        address["task"] = args.task
+        material = TaskReader.from_profile(args.root, args.profile).read_material(address)
+    else:
+        if args.profile is not None:
+            bad("read", "--profile относится к текущему адресу --task")
+        address["commit"] = args.commit
+        if args.select is not None:
+            address["select"] = parse(args.select, "--select")
+        material = read_history(BaseChecker(args.root, None), address)
+    if isinstance(material, bytes):
+        sys.stdout.buffer.write(material)
+    else:
+        # Legacy payloads may contain exact decimal values. Keep their lexical
+        # value in JSON without converting to binary floats.
+        sys.stdout.write(json_record(material) + "\n")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=SCOPE + " " + LIMIT)
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check", help="только чтение состояния и Git")
     check.add_argument("--root", required=True, help="допустимый корень, он же корень Git")
-    check.add_argument("--state", default="docs/ai-work/state.json", help="путь относительно корня")
+    source = check.add_mutually_exclusive_group()
+    source.add_argument("--state", help="явный путь прежнего файла состояния от корня")
+    source.add_argument("--profile", help="путь заполненного профиля от корня")
+    check.add_argument("--action", choices=("assign", "execute", "review", "handoff"),
+                       help="сверить заявленный переход по карточке")
+    check.add_argument("--task", help="полный номер задачи для --action")
+    check.add_argument("--actor", help="сессия редактора или исполнитель для --action")
+    check.add_argument("--attempt", help="ключ попытки, если действие относится к запуску")
+    tasks = sub.add_parser("tasks", help="перечислить карточки или открыть задачу по полному номеру")
+    tasks.add_argument("--root", required=True)
+    tasks.add_argument("--profile", required=True)
+    tasks.add_argument("number", nargs="?", help="полный номер задачи, например P/T-008")
+    move = sub.add_parser("move", help="сверить размещение или перенести папку по действующему решению")
+    move.add_argument("--root", required=True)
+    move.add_argument("--profile", required=True)
+    move.add_argument("--task", required=True, help="полный номер задачи")
+    move.add_argument("--actor", help="сессия редактора области для переноса")
+    move.add_argument("--review", help="JSON осмотра с владельцами и ссылками; запускает перенос")
+    overview = sub.add_parser("overview", help="открыть локальный обзор задач в браузере")
+    overview.add_argument("--root", default=".", help="корень проекта, по умолчанию текущий каталог")
+    overview.add_argument("--profile", required=True, help="путь заполненного профиля от корня")
+    read = sub.add_parser("read", help="открыть текущий материал задачи или байты из Git")
+    read.add_argument("--root", required=True)
+    read.add_argument("--profile", help="путь заполненного профиля для --task")
+    read.add_argument("--path", required=True, help="путь в папке задачи или в дереве коммита")
+    read.add_argument("--select", help="JSON-ключ записи внутри прежнего файла в Git")
+    address = read.add_mutually_exclusive_group(required=True)
+    address.add_argument("--task", help="полный номер живой задачи")
+    address.add_argument("--commit", help="полный идентификатор Git-коммита")
+    migration = sub.add_parser("migration", help="подготовить, сверить и выбрать карточки")
+    phases = migration.add_subparsers(dest="phase", required=True)
+    for phase in ("inventory", "prepare", "verify", "switch"):
+        command = phases.add_parser(phase)
+        command.add_argument("--root", required=True,
+                             help="проверяемый корень; для switch — установка, которую переключают")
+        command.add_argument("--review", required=True, help="JSON сопоставления, составленный редактором")
+        if phase != "inventory":
+            command.add_argument("--origin", required=True, help="отдельный корень старой установки")
+            command.add_argument("--snapshot", required=True, help="снимок команды inventory")
+            command.add_argument("--target", required=True, help="выделенная папка от корня копии")
+            command.add_argument("--bindings", help="JSON адресов снимков карточек в истории копии")
+        if phase == "prepare":
+            command.add_argument("--previous-bindings", help="JSON адресов предыдущей проверенной сборки")
+        if phase == "switch":
+            command.add_argument("--actor", required=True, help="сессия общего редактора")
+            command.add_argument("--pause", required=True, help="путь записи остановки от корня")
     args = parser.parse_args(argv)
-    emit(SCOPE)
     try:
-        checker = Checker(args.root, args.state)
-        initial = parse(checker.file(args.state, "state").read_bytes(), args.state)
-        if isinstance(initial, dict) and "format_version" in initial and record_format(initial["format_version"]) is None:
-            unsupported("state/format_version", "поддерживаются только " + SUPPORTED_FORMATS)
-        if isinstance(initial, dict) and record_format(initial.get("format_version")) == CURRENT_FORMAT:
-            from records import RecordsChecker
-            checker = RecordsChecker(args.root, args.state)
-        status = checker.check()
+        if args.command == "migration":
+            from task_migration import run
+            return run(args, state_checker)
+        if args.command == "tasks":
+            show_tasks(args)
+            return 0
+        if args.command == "move":
+            from task_moves import TaskMove
+            if bool(args.actor) != bool(args.review):
+                bad("move", "для переноса нужны одновременно --actor и --review")
+            move = TaskMove.from_profile(args.root, args.profile)
+            result = (move.apply_move(args.profile, args.task, args.actor, args.review)
+                      if args.review else move.inspect_move(args.task))
+            emit(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "overview":
+            from overview import serve
+            serve(args.root, args.profile)
+            return 0
+        if args.command == "read":
+            show_material(args)
+            return 0
+        emit(SCOPE)
+        if args.action is None and any(v is not None for v in (args.task, args.actor, args.attempt)):
+            bad("check", "--task, --actor и --attempt относятся к --action")
+        if args.action is not None and (args.profile is None or not args.task or not args.actor):
+            bad("check", "для --action нужны --profile, --task и --actor")
+        checker, selection = select_checker(args)
+        if selection is not None:
+            emit(f"Источник из {args.profile}: {selection['path']} ({selection['format_version']}).")
+            if path := selection.get("pause"):
+                from task_actions import transition_status
+                pause, editor, step = transition_status(checker, args.profile, selection, path)
+                notice = {"paused": "Выдача приостановлена",
+                          "reviewed": "Выдача проверенных работ возобновлена",
+                          "stopped": "Переход остановлен"}[pause["state"]]
+                emit(f"{notice} ({path}). Следующий шаг — {step}")
+                if editor:
+                    emit(f"Координатор общей выдачи — {editor['role']} ({editor['session']}).")
+        if args.action is None:
+            status = checker.check()
+            if selection and selection["format_version"] == TASK_FORMAT:
+                for continuation in checker.continuations():
+                    emit("Продолжение: " + continuation)
+        else:
+            from task_actions import TaskActions
+            if not isinstance(checker, TaskActions):
+                unsupported("check", "--action применяется к карточкам " + TASK_FORMAT)
+            status = checker.action(args.profile, args.task, args.action, args.actor, args.attempt)
         for info in checker.infos:
             emit("INFO: " + info)
         emit(f"OK: формальных противоречий не найдено; состояние {status}.")
@@ -250,12 +398,19 @@ def main(argv=None):
         return 0
     except Problem as error:
         prefix = "UNSUPPORTED" if error.code == 2 else "ERROR"
-        emit(f"{prefix}: {error.where}: {error.message}")
-        emit(LIMIT)
+        if args.command == "check":
+            emit(f"{prefix}: {error.where}: {error.message}")
+            emit(LIMIT)
+        else:
+            print(f"{prefix}: {error.where}: {error.message}", file=sys.stderr)
         return error.code
     except (OSError, UnicodeError, ValueError, RecursionError) as error:
-        emit(f"ERROR: чтение: {type(error).__name__}; проверьте доступность и формат файлов.")
-        emit(LIMIT)
+        message = f"ERROR: чтение: {type(error).__name__}; проверьте доступность и формат файлов."
+        if args.command == "check":
+            emit(message)
+            emit(LIMIT)
+        else:
+            print(message, file=sys.stderr)
         return 1
 
 

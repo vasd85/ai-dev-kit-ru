@@ -5,15 +5,108 @@ from pathlib import PurePosixPath
 import re
 from fractions import Fraction
 
-from read_support import BaseChecker, bad, canonical, equal, number, obj, parse, revision, string, strings, unsupported
+from read_support import (
+    BaseChecker, bad, canonical, equal, number, obj, parse, revision,
+    sequence, string, strings, unsupported,
+)
 
-from versions import CURRENT_FORMAT, record_format
+from versions import CURRENT_FORMAT, LEGACY_FORMAT, record_format
 
 
-def sequence(value, where, nonempty=False):
-    if not isinstance(value, list) or (nonempty and not value):
-        bad(where, "ожидается " + ("непустой " if nonempty else "") + "список")
-    return value
+ASSIGNMENT_COMMON_FIELDS = frozenset({
+    "id", "revision", "goal", "boundaries", "inputs", "criteria", "plan", "acceptor", "authority",
+})
+ASSIGNMENT_FIELDS = ASSIGNMENT_COMMON_FIELDS | {"write_scope", "stage"}
+ASSIGNMENT_OPTIONAL_FIELDS = frozenset({"dependencies", "decisions", "mandate"})
+LEGACY_ASSIGNMENT_FIELDS = ASSIGNMENT_COMMON_FIELDS | {"write_files", "executor", "authorized_action"}
+RESULT_FIELDS = frozenset({
+    "id", "revision", "assignment_id", "assignment_revision", "attempt_id", "executor",
+    "summary", "commit", "artifacts", "checks", "unverified", "limitations", "next_step",
+})
+
+
+def by_id(items, key, where):
+    matches = [item for item in sequence(items, where)
+               if isinstance(item, dict) and item.get("id") == key]
+    if len(matches) != 1:
+        bad(where, f"нет единственной записи с ключом {key!r}")
+    return matches[0]
+
+
+def saved_work(state, key, where):
+    version = record_format(state.get("format_version")) if isinstance(state, dict) else None
+    if version == CURRENT_FORMAT:
+        return by_id(state.get("works"), key, where + "/works")
+    if version == LEGACY_FORMAT:
+        return by_id([state.get("task")], key, where + "/task")
+    unsupported(where, "ожидается составная запись формата 0.2.0 или 0.1.0")
+
+
+def saved_selector(selector, where):
+    obj(selector, where, ["kind", "key", "revision"], ["work", "attempt"])
+    for field in ("key", "work", "attempt"):
+        if field in selector:
+            string(selector[field], where + "/" + field)
+    revision(selector["revision"], where + "/revision")
+    kind = selector["kind"]
+    if kind not in ("assignment", "criterion", "attempt", "result", "acceptance"):
+        bad(where + "/kind", "ожидается assignment, criterion, attempt, result или acceptance")
+    if "work" not in selector and kind not in ("assignment", "result"):
+        bad(where + "/work", "для выбора внутри составной записи нужен ключ работы")
+    if kind == "result" and "work" in selector:
+        string(selector.get("attempt"), where + "/attempt")
+    elif "attempt" in selector:
+        bad(where + "/attempt", "ключ попытки относится только к результату внутри работы")
+
+
+def saved_record(reader, ref, name, selector):
+    """Read a keyed record at an explicit path, independent of the live ledger."""
+    where = f"Git:{ref}:{name}"
+    saved_selector(selector, "select")
+
+    def dereference(value):
+        if isinstance(value, dict) and "path" in value:
+            obj(value, where, ["path"])
+            return reader.saved_json(ref, value["path"])
+        return value
+
+    record = reader.saved_json(ref, name)
+    field = "revision"
+    key, kind = selector["key"], selector["kind"]
+    if "work" not in selector:
+        fields = record.keys() if isinstance(record, dict) else set()
+        if kind == "assignment":
+            matches_kind = (fields == LEGACY_ASSIGNMENT_FIELDS or
+                            ASSIGNMENT_FIELDS <= fields <= ASSIGNMENT_FIELDS | ASSIGNMENT_OPTIONAL_FIELDS)
+        else:
+            matches_kind = fields == RESULT_FIELDS
+        if not matches_kind:
+            bad(where, f"несоответствие вида: поля файла не соответствуют отдельной записи {kind}")
+        record = by_id([record], key, where)
+    else:
+        task = saved_work(record, selector["work"], where)
+        if kind in ("assignment", "criterion"):
+            assignment = dereference(task.get("assignment"))
+            if not isinstance(assignment, dict):
+                bad(where + "/assignment", "нет поручения")
+            if kind == "criterion":
+                equal(assignment.get("revision"), selector["revision"], where + "/assignment/revision")
+                return by_id(assignment.get("criteria"), key, where + "/criteria")
+            record = by_id([assignment], key, where + "/assignment")
+        elif kind == "acceptance":
+            record = by_id(task.get("acceptances", [task.get("acceptance")]), key, where + "/acceptance")
+            field = "assignment_revision"
+        else:
+            attempts = task.get("attempts", [task.get("attempt")])
+            if kind == "attempt":
+                record = by_id(attempts, key, where + "/attempts")
+                field = "assignment_revision"
+            else:
+                attempt = by_id(attempts, selector["attempt"], where + "/attempts")
+                value = attempt.get("result", task.get("result"))
+                record = by_id([dereference(value)], key, where + "/result")
+    equal(record.get(field), selector["revision"], where + "/" + field)
+    return record
 
 
 def quantity(value, where):
@@ -225,8 +318,7 @@ class RecordsChecker(BaseChecker):
             self.infos.append(name + ": внешний URL не проверен и не загружен: " + url)
 
     def assignment(self, a, s, w, kind):
-        obj(a, w, ["id", "revision", "goal", "boundaries", "inputs", "write_scope", "criteria",
-                   "plan", "acceptor", "stage", "authority"], ["dependencies", "decisions", "mandate"])
+        obj(a, w, ASSIGNMENT_FIELDS, ASSIGNMENT_OPTIONAL_FIELDS)
         self.ident(a["id"], w + "/id")
         revision(a["revision"], w + "/revision")
         for k in ("goal", "boundaries", "acceptor"):
@@ -285,40 +377,24 @@ class RecordsChecker(BaseChecker):
         elif "mandate" in a:
             bad(w + "/mandate", "мандат относится только к функции")
 
-    def saved_json(self, ref, name):
-        # Check the local spelling/boundary even when content comes from Git.
-        self.local(name, "Git:source", must_exist=False)
-        return parse(self.git("cat-file", "blob", ref + ":" + name), "Git:" + ref + ":" + name)
-
-    def snapshot(self, ref, wid):
-        key = (ref, wid)
+    def snapshot(self, ref, name, wid, where):
+        key = (ref, name, wid)
         if key not in self.snapshots:
-            task, _, name, w = self.works[wid]
             saved = self.saved_json(ref, name)
             if not isinstance(saved, dict) or record_format(saved.get("format_version")) != CURRENT_FORMAT:
-                bad(w, "нет поддержанного состояния в Git")
-            matches = [x for x in sequence(saved.get("works"), "Git:works")
-                       if isinstance(x, dict) and x.get("id") == wid]
-            if len(matches) != 1:
-                bad(w, "в Git нет единственной работы " + wid)
-            old = matches[0]
+                bad(where, "нет поддержанного состояния в Git")
+            old = saved_work(saved, wid, f"Git:{ref or 'индекс'}:{name}")
             a = self.source(old.get("assignment"), "Git:assignment", ref)
-            obj(a, w + "/Git:assignment",
-                ["id", "revision", "goal", "boundaries", "inputs", "write_scope", "criteria",
-                 "plan", "acceptor", "stage", "authority"], ["dependencies", "decisions", "mandate"])
-            revision(a["revision"], w + "/Git:assignment/revision")
-            string(a["id"], w + "/Git:assignment/id")
-            strings(a["inputs"], w + "/Git:assignment/inputs", True)
-            for criterion in sequence(a["criteria"], w + "/Git:assignment/criteria", True):
-                obj(criterion, w + "/Git:assignment/criteria", ["id", "expectation"])
-                string(criterion["id"], w + "/Git:assignment/criteria/id")
+            w = where + "/Git:assignment"
+            obj(a, w, ASSIGNMENT_FIELDS, ASSIGNMENT_OPTIONAL_FIELDS)
+            revision(a["revision"], w + "/revision")
+            string(a["id"], w + "/id")
+            strings(a["inputs"], w + "/inputs", True)
+            for criterion in sequence(a["criteria"], w + "/criteria", True):
+                obj(criterion, w + "/criteria", ["id", "expectation"])
+                string(criterion["id"], w + "/criteria/id")
             self.snapshots[key] = (old, a)
         return self.snapshots[key]
-
-    def commit(self, value, w):
-        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
-            bad(w, "нужен полный идентификатор Git-коммита")
-        equal(self.git("cat-file", "-t", value).strip(), b"commit", w)
 
     def read_results(self):
         for aid, (at, task, aw) in self.attempts.items():
@@ -328,9 +404,7 @@ class RecordsChecker(BaseChecker):
                 bad(aw + "/result", "результат требует установленного прекращения исполнения")
             r = self.source(at["result"], aw + "/result")
             w = aw + "/result"
-            obj(r, w, ["id", "revision", "assignment_id", "assignment_revision", "attempt_id",
-                       "executor", "summary", "commit", "artifacts", "checks", "unverified",
-                       "limitations", "next_step"])
+            obj(r, w, RESULT_FIELDS)
             self.ident(r["id"], w + "/id")
             revision(r["revision"], w + "/revision")
             equal(r["attempt_id"], aid, w + "/attempt_id")
@@ -341,7 +415,7 @@ class RecordsChecker(BaseChecker):
             for k in ("unverified", "limitations"):
                 strings(r[k], w + "/" + k)
             self.commit(r["commit"], w + "/commit")
-            old, a = self.snapshot(r["commit"], task["id"])
+            old, a = self.snapshot(r["commit"], self.works[task["id"]][2], task["id"], w)
             authority = obj(a["authority"], w + "/authority", ["by", "source"])
             string(authority["by"], w + "/authority/by")
             self.local(authority["source"], w + "/authority/source", must_exist=False)
@@ -381,7 +455,7 @@ class RecordsChecker(BaseChecker):
                     revision(co["assignment_revision"], cw + "/covers/assignment_revision")
                     if co["work"] not in self.works:
                         bad(cw + "/covers", "неизвестная работа")
-                    _, ca = self.snapshot(r["commit"], co["work"])
+                    _, ca = self.snapshot(r["commit"], self.works[co["work"]][2], co["work"], cw)
                     equal(co["assignment_revision"], ca.get("revision"), cw + "/covers/assignment_revision")
                     if co["criterion"] not in [c["id"] for c in ca.get("criteria", [])]:
                         bad(cw + "/covers/criterion", "неизвестный критерий")
@@ -488,11 +562,11 @@ class RecordsChecker(BaseChecker):
             if not any(contains(p, self.decisions[d["id"]]["source"]) for p in a["inputs"]):
                 bad(w + "/inputs", "источник общего решения не включён во входы")
         if s["scope"] == "feature":
-            parent, _, _, pw = self.works[s["parent"]["work"]]
+            parent, _, parent_path, pw = self.works[s["parent"]["work"]]
             pa = parent["_assignment"]
             equal(s["parent"]["assignment_revision"], pa["revision"], name + "/parent/assignment_revision")
             self.commit(s["parent"]["commit"], name + "/parent/commit")
-            _, bound = self.snapshot(s["parent"]["commit"], parent["id"])
+            _, bound = self.snapshot(s["parent"]["commit"], parent_path, parent["id"], pw)
             if canonical(bound) != canonical(pa):
                 bad(name + "/parent", "содержание общего поручения отличается от принятого")
             norms = [self.product["profile"], pa["authority"]["source"]]
@@ -703,16 +777,17 @@ class RecordsChecker(BaseChecker):
         return result
 
     def fresh(self, rid, obligation=None, compatibility=None):
-        r, task, a, _, _, _, w = self.results[rid]
-        scopes = a["inputs"]
-        old = self.input_tree(r["commit"], scopes, w)
-        target = r["commit"]
+        result, _, assignment, _, _, _, where = self.results[rid]
+        self.check_result_inputs(result["commit"], assignment["inputs"], where, obligation, compatibility)
+
+    def check_result_inputs(self, commit, scopes, w, obligation=None, compatibility=None):
+        target = commit
         if compatibility is not None:
             c = obj(compatibility, w + "/compatibility",
                     ["from_commit", "to_commit", "work", "assignment_revision", "criterion",
                      "differences", "reason", "by"])
             revision(c["assignment_revision"], w + "/compatibility/assignment_revision")
-            equal(c["from_commit"], r["commit"], w + "/compatibility/from_commit")
+            equal(c["from_commit"], commit, w + "/compatibility/from_commit")
             self.commit(c["to_commit"], w + "/compatibility/to_commit")
             if obligation is None:
                 bad(w, "совместимость требует конкретного обязательства")
@@ -721,6 +796,7 @@ class RecordsChecker(BaseChecker):
             for k in ("reason", "by"):
                 string(c[k], w + "/compatibility/" + k)
             target = c["to_commit"]
+            old = self.input_tree(commit, scopes, w)
             new = self.input_tree(target, scopes, w)
             changed = {n for n in old.keys() | new.keys() if old.get(n) != new.get(n)}
             equal(set(c["differences"]), changed, w + "/compatibility/differences")
@@ -766,11 +842,12 @@ class RecordsChecker(BaseChecker):
             if canonical(saved) != canonical(expected):
                 bad(w + "/assignment", "содержание поручения отличается: " + label)
 
-        compare(self.works[wid][0]["_assignment"], "рабочие данные")
+        task, _, path, _ = self.works[wid]
+        compare(task["_assignment"], "рабочие данные")
         for ref in ("HEAD", ""):
             # An empty ref is the index's :path syntax. Compare the normative
             # assignment only, never progress, results or the complete ledger.
-            _, saved = self.snapshot(ref, wid)
+            _, saved = self.snapshot(ref, path, wid, w)
             compare(saved, ref or "индекс")
 
     def candidate(self, task, acceptance=False):
@@ -832,7 +909,7 @@ class RecordsChecker(BaseChecker):
             r, _, _, checks, _, _, _ = evidence
             allowed_effects(evidence[2], self.attempts[r["attempt_id"]][0], bw)
             accepted_assignment = self.results[ac[2]["id"]][2]
-            _, confirmed_assignment = self.snapshot(r["commit"], b["work"])
+            _, confirmed_assignment = self.snapshot(r["commit"], self.works[b["work"]][2], b["work"], bw)
             if canonical(confirmed_assignment) != canonical(accepted_assignment):
                 bad(bw + "/check", "содержание подтверждаемого обязательства отличается от принятого поручения")
             self.current_assignment(b["work"], accepted_assignment, bw)

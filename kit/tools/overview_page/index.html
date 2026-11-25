@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>$project — Задачи</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+</head>
+<body data-poll-ms="$poll_ms">
+    <header class="project">
+        <div>
+            <h1>$project</h1>
+            <p class="path">$root</p>
+        </div>
+        <div id="freshness" class="freshness" data-state="loading">
+            <div class="freshness-line">
+                <span id="connection" role="status">Загрузка задач…</span>
+                <time id="checked-at" hidden></time>
+            </div>
+            <p id="issue" hidden></p>
+        </div>
+    </header>
+    <main class="workspace">
+        <section class="directory" aria-label="Список задач">
+            <nav class="views" aria-label="Представление задач">
+                <button id="tree-view" type="button" aria-pressed="true">Дерево задач</button>
+                <button id="all-view" type="button" aria-pressed="false">Все задачи</button>
+            </nav>
+            <div class="filters" id="tree-filters">
+                <label class="open-filter">
+                    <input id="open-roots" type="checkbox" checked> Только открытые корни
+                </label>
+            </div>
+            <div class="filters" id="all-filters" hidden>
+                <label class="search">Поиск
+                    <input id="search" type="search" placeholder="Номер или название">
+                </label>
+                <div class="selects">
+                    <label>Статус <select id="status-filter"></select></label>
+                    <label>Родитель <select id="parent-filter"></select></label>
+                </div>
+            </div>
+            <div id="listing" class="listing" aria-busy="true"></div>
+            <div id="list-count" class="list-count" hidden></div>
+        </section>
+        <section id="card" class="card" aria-label="Карточка задачи">
+            <p class="placeholder">Выберите задачу из списка.</p>
+        </section>
+    </main>
+</body>
+</html>

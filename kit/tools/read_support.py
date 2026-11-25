@@ -67,6 +67,12 @@ def strings(value, where, nonempty=False):
     return value
 
 
+def sequence(value, where, nonempty=False):
+    if not isinstance(value, list) or (nonempty and not value):
+        bad(where, "ожидается " + ("непустой " if nonempty else "") + "список")
+    return value
+
+
 def revision(value, where):
     if type(value) is not int or value < 1:
         bad(where, "редакция должна быть положительным целым числом")
@@ -113,6 +119,35 @@ def parse(data, where):
         bad(where, f"нечитаемый JSON: {error}")
 
 
+def json_record(value, *, pretty=False, depth=0):
+    """Serialize the exact decimal values returned by parse()."""
+    if isinstance(value, Decimal):
+        return str(value)
+    encode = lambda item: json_record(item, pretty=pretty, depth=depth + 1)
+    if isinstance(value, dict):
+        start, end = "{", "}"
+        items = [encode(key) + ": " + encode(item) for key, item in value.items()]
+    elif isinstance(value, list):
+        start, end = "[", "]"
+        items = [encode(item) for item in value]
+    else:
+        return json.dumps(value, ensure_ascii=not pretty)
+    if not items or not pretty:
+        return start + ", ".join(items) + end
+    indent = "  " * (depth + 1)
+    return start + "\n" + indent + (",\n" + indent).join(items) + "\n" + "  " * depth + end
+
+
+def relative_path(value, where):
+    string(value, where)
+    path = PurePosixPath(value)
+    if (path.is_absolute() or value != path.as_posix() or
+            any(part.lower() in ("..", ".git") for part in path.parts) or
+            any(c in value for c in ("\\", ":", "\n", "\r", "\0"))):
+        bad(where, "нужен нормализованный относительный путь внутри корня, без .git")
+    return path
+
+
 class BaseChecker:
     def __init__(self, root, state):
         root_path = Path(root).absolute()
@@ -128,12 +163,7 @@ class BaseChecker:
         self.infos = []
 
     def local(self, value, where, must_exist=True):
-        string(value, where)
-        p = PurePosixPath(value)
-        if (p.is_absolute() or value != p.as_posix() or
-                any(part in ("..", ".git") for part in p.parts) or
-                any(c in value for c in ("\\", ":", "\n", "\r", "\0"))):
-            bad(where, "нужен нормализованный относительный путь внутри корня, без .git")
+        p = relative_path(value, where)
         current = self.root
         for part in p.parts:
             current = current / part
@@ -228,4 +258,39 @@ class BaseChecker:
                 metadata, name = entry.split(b"\t", 1)
                 entries[os.fsdecode(name)] = tuple(metadata.split())
         return entries
+
+    def commit(self, value, where):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+            bad(where, "нужен полный идентификатор Git-коммита")
+        if self.git("cat-file", "-t", value).strip() != b"commit":
+            bad(where, "объект Git должен быть коммитом")
+
+    def saved_file(self, ref, name):
+        # HEAD and the index are internal layers used by the previous check.
+        # Public historical addresses must pass commit() before reaching here.
+        where = f"Git:{ref or 'индекс'}:{name}"
+        relative_path(name, where)
+        if name == ".":
+            bad(where, "нужен путь обычного файла")
+        if ref:
+            entries = self.git("ls-tree", "-z", "--full-tree", ref, "--", ":(literal)" + name)
+        else:
+            entries = self.git("ls-files", "--stage", "-z", "--", ":(literal)" + name)
+        for entry in entries.split(b"\0")[:-1]:
+            metadata, raw_path = entry.split(b"\t", 1)
+            if os.fsdecode(raw_path) != name:
+                continue
+            if ref:
+                mode, kind, oid = metadata.split()
+                ordinary = kind == b"blob"
+            else:
+                mode, oid, stage = metadata.split()
+                ordinary = stage == b"0"
+            if not ordinary or mode not in (b"100644", b"100755"):
+                bad(where, "ожидается обычный файл, без символических ссылок и конфликтов индекса")
+            return self.git("cat-file", "blob", oid.decode("ascii"))
+        bad(where, "путь отсутствует в указанном снимке Git")
+
+    def saved_json(self, ref, name):
+        return parse(self.saved_file(ref, name), f"Git:{ref or 'индекс'}:{name}")
 
